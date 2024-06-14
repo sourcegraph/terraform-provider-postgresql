@@ -12,9 +12,12 @@ import (
 
 	"github.com/blang/semver"
 	_ "github.com/lib/pq" // PostgreSQL db
+	"gocloud.dev/gcp"
+	"gocloud.dev/gcp/cloudsql"
 	"gocloud.dev/postgres"
 	_ "gocloud.dev/postgres/awspostgres"
-	_ "gocloud.dev/postgres/gcppostgres"
+	"gocloud.dev/postgres/gcppostgres"
+	"google.golang.org/api/impersonate"
 )
 
 type featureName uint
@@ -157,21 +160,22 @@ type ClientCertificateConfig struct {
 
 // Config - provider config
 type Config struct {
-	Scheme            string
-	Host              string
-	Port              int
-	Username          string
-	Password          string
-	DatabaseUsername  string
-	Superuser         bool
-	SSLMode           string
-	ApplicationName   string
-	Timeout           int
-	ConnectTimeoutSec int
-	MaxConns          int
-	ExpectedVersion   semver.Version
-	SSLClientCert     *ClientCertificateConfig
-	SSLRootCertPath   string
+	Scheme                          string
+	Host                            string
+	Port                            int
+	Username                        string
+	Password                        string
+	DatabaseUsername                string
+	Superuser                       bool
+	SSLMode                         string
+	ApplicationName                 string
+	Timeout                         int
+	ConnectTimeoutSec               int
+	MaxConns                        int
+	ExpectedVersion                 semver.Version
+	SSLClientCert                   *ClientCertificateConfig
+	SSLRootCertPath                 string
+	GCPIAMImpersonateServiceAccount string
 }
 
 // Client struct holding connection string
@@ -280,6 +284,25 @@ func (c *Client) Connect() (*DBConnection, error) {
 		var err error
 		if c.config.Scheme == "postgres" {
 			db, err = sql.Open(proxyDriverName, dsn)
+		} else if c.config.Scheme == "gcppostgres" && c.config.GCPIAMImpersonateServiceAccount != "" {
+			ts, err := impersonate.CredentialsTokenSource(context.Background(), impersonate.CredentialsConfig{
+				TargetPrincipal: c.config.GCPIAMImpersonateServiceAccount,
+				Scopes:          []string{"https://www.googleapis.com/auth/sqlservice.admin"},
+			})
+			if err != nil {
+				return nil, fmt.Errorf("Error creating token source with service account impersonation of %s: %w", c.config.GCPIAMImpersonateServiceAccount, err)
+			}
+			client, err := gcp.NewHTTPClient(gcp.DefaultTransport(), ts)
+			if err != nil {
+				return nil, fmt.Errorf("Error creating HTTP client with service account impersonation of %s: %w", c.config.GCPIAMImpersonateServiceAccount, err)
+			}
+			certSource := cloudsql.NewCertSourceWithIAM(client, ts)
+			opener := gcppostgres.URLOpener{CertSource: certSource}
+			u, err := url.Parse(dsn)
+			if err != nil {
+				return nil, fmt.Errorf("Error parsing connection string: %w", err)
+			}
+			db, err = opener.OpenPostgresURL(context.Background(), u)
 		} else {
 			db, err = postgres.Open(context.Background(), dsn)
 		}
