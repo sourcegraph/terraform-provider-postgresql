@@ -11,6 +11,10 @@ import (
 	"github.com/lib/pq"
 )
 
+const (
+	roleExtensionAttrsAttr = "extension_attrs"
+)
+
 func resourcePostgreSQLRoleAttribute() *schema.Resource {
 	return &schema.Resource{
 		Create: PGResourceFunc(resourcePostgreSQLRoleAttributeCreate),
@@ -110,6 +114,12 @@ func resourcePostgreSQLRoleAttribute() *schema.Resource {
 				Type:        schema.TypeString,
 				Optional:    true,
 				Description: "Role to switch to at login",
+			},
+			roleExtensionAttrsAttr: {
+				Type:        schema.TypeMap,
+				Optional:    true,
+				Description: "Map of arbitrary GUC (Grand Unified Configuration) key-value pairs to set for the role. Supports all PostgreSQL custom variables.",
+				Elem:        &schema.Schema{Type: schema.TypeString},
 			},
 		},
 	}
@@ -271,6 +281,10 @@ func resourcePostgreSQLRoleAttributeReadImpl(db *DBConnection, d *schema.Resourc
 		d.Set(rolePasswordAttr, password)
 	}
 
+	if _, ok := d.GetOk(roleExtensionAttrsAttr); ok {
+		d.Set(roleExtensionAttrsAttr, readExtensionAttrs(roleConfig))
+	}
+
 	return nil
 }
 
@@ -398,6 +412,101 @@ func setRoleAttributes(txn *sql.Tx, db *DBConnection, d *schema.ResourceData) er
 	if d.HasChange(roleAssumeRoleAttr) {
 		if err := setAssumeRole(txn, d); err != nil {
 			return err
+		}
+	}
+
+	if d.HasChange(roleExtensionAttrsAttr) {
+		if err := setExtensionAttrs(txn, d); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// readExtensionAttrs extracts arbitrary GUC parameters from roleConfig array,
+// excluding well-known parameters that are handled by specific attributes.
+func readExtensionAttrs(roleConfig pq.ByteaArray) map[string]string {
+	extensionAttrs := make(map[string]string)
+
+	// Well-known parameters that should be excluded from extension_attrs
+	excludedParams := map[string]bool{
+		"search_path":                         true,
+		"statement_timeout":                   true,
+		"idle_in_transaction_session_timeout": true,
+		"role":                                true, // assume_role
+	}
+
+	for _, v := range roleConfig {
+		config := string(v)
+
+		// Split on first '=' to get key=value
+		parts := strings.SplitN(config, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := parts[0]
+		value := parts[1]
+
+		// Skip well-known parameters
+		if excludedParams[key] {
+			continue
+		}
+
+		extensionAttrs[key] = value
+	}
+
+	return extensionAttrs
+}
+
+// setExtensionAttrs sets arbitrary GUC parameters for a role
+func setExtensionAttrs(txn *sql.Tx, d *schema.ResourceData) error {
+	roleName := d.Get(roleNameAttr).(string)
+	extensionAttrsRaw := d.Get(roleExtensionAttrsAttr).(map[string]interface{})
+
+	// Convert interface{} map to string map
+	extensionAttrs := make(map[string]string)
+	for k, v := range extensionAttrsRaw {
+		extensionAttrs[k] = fmt.Sprintf("%v", v)
+	}
+
+	// Get old and new values to determine what needs to be changed
+	oldRaw, _ := d.GetChange(roleExtensionAttrsAttr)
+	oldAttrs := make(map[string]string)
+	newAttrs := extensionAttrs
+
+	if oldRaw != nil {
+		oldAttrsRaw := oldRaw.(map[string]interface{})
+		for k, v := range oldAttrsRaw {
+			oldAttrs[k] = fmt.Sprintf("%v", v)
+		}
+	}
+
+	// Reset parameters that were removed
+	for key := range oldAttrs {
+		if _, exists := newAttrs[key]; !exists {
+			sql := fmt.Sprintf("ALTER ROLE %s RESET %s", pq.QuoteIdentifier(roleName), pq.QuoteIdentifier(key))
+			if _, err := txn.Exec(sql); err != nil {
+				return fmt.Errorf("could not reset %s for role %s: %w", key, roleName, err)
+			}
+		}
+	}
+
+	// Set new or changed parameters
+	for key, value := range newAttrs {
+		if oldValue, exists := oldAttrs[key]; !exists || oldValue != value {
+			var sql string
+			if value == "" {
+				// Reset parameter if value is empty
+				sql = fmt.Sprintf("ALTER ROLE %s RESET %s", pq.QuoteIdentifier(roleName), pq.QuoteIdentifier(key))
+			} else {
+				sql = fmt.Sprintf("ALTER ROLE %s SET %s = '%s'", pq.QuoteIdentifier(roleName), pq.QuoteIdentifier(key), pqQuoteLiteral(value))
+			}
+
+			if _, err := txn.Exec(sql); err != nil {
+				return fmt.Errorf("could not set %s for role %s: %w", key, roleName, err)
+			}
 		}
 	}
 
