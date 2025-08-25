@@ -30,6 +30,12 @@ resource "postgresql_role_attribute" "app_iam_service_account_role_attrs" {
   name                      = postgresql_role.app_iam_service_account.name
   bypass_row_level_security = true
 }
+
+# Configure pgAudit logging for a database administrator role
+resource "postgresql_role_attribute" "dba_audit_attrs" {
+  name        = "dba_role"
+  pgaudit_log = "READ,WRITE,DDL"
+}
 ```
 
 ## Argument Reference
@@ -50,6 +56,7 @@ resource "postgresql_role_attribute" "app_iam_service_account_role_attrs" {
 * `search_path` - (Optional) Sets the role's search path.
 * `statement_timeout` - (Optional) Abort any statement that takes more than the specified number of milliseconds.
 * `assume_role` - (Optional) Role to switch to at login.
+* `pgaudit_log` - (Optional) pgAudit log settings for this role. Valid values: READ, WRITE, FUNCTION, ROLE, DDL, MISC, MISC_SET, ALL. Multiple values can be comma-separated (e.g., 'READ,WRITE').
 
 ## Import
 

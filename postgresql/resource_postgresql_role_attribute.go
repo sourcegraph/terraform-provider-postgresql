@@ -11,6 +11,10 @@ import (
 	"github.com/lib/pq"
 )
 
+const (
+	rolePgAuditLogAttr = "pgaudit_log"
+)
+
 func resourcePostgreSQLRoleAttribute() *schema.Resource {
 	return &schema.Resource{
 		Create: PGResourceFunc(resourcePostgreSQLRoleAttributeCreate),
@@ -110,6 +114,11 @@ func resourcePostgreSQLRoleAttribute() *schema.Resource {
 				Type:        schema.TypeString,
 				Optional:    true,
 				Description: "Role to switch to at login",
+			},
+			rolePgAuditLogAttr: {
+				Type:        schema.TypeString,
+				Optional:    true,
+				Description: "pgAudit log settings for this role. Valid values: READ, WRITE, FUNCTION, ROLE, DDL, MISC, MISC_SET, ALL. Multiple values can be comma-separated (e.g., 'READ,WRITE')",
 			},
 		},
 	}
@@ -271,6 +280,10 @@ func resourcePostgreSQLRoleAttributeReadImpl(db *DBConnection, d *schema.Resourc
 		d.Set(rolePasswordAttr, password)
 	}
 
+	if _, ok := d.GetOk(rolePgAuditLogAttr); ok {
+		d.Set(rolePgAuditLogAttr, readPgAuditLog(roleConfig))
+	}
+
 	return nil
 }
 
@@ -401,5 +414,43 @@ func setRoleAttributes(txn *sql.Tx, db *DBConnection, d *schema.ResourceData) er
 		}
 	}
 
+	if d.HasChange(rolePgAuditLogAttr) {
+		if err := setPgAuditLog(txn, d); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// readPgAuditLog searches for a pgaudit.log entry in the rolconfig array.
+// In case no such value is present, it returns empty string.
+func readPgAuditLog(roleConfig pq.ByteaArray) string {
+	pgAuditLogAttr := "pgaudit.log"
+	for _, v := range roleConfig {
+		config := string(v)
+		if strings.HasPrefix(config, pgAuditLogAttr) {
+			return strings.TrimPrefix(config, pgAuditLogAttr+"=")
+		}
+	}
+	return ""
+}
+
+// setPgAuditLog sets the pgaudit.log parameter for a role
+func setPgAuditLog(txn *sql.Tx, d *schema.ResourceData) error {
+	roleName := d.Get(roleNameAttr).(string)
+	pgAuditLog := d.Get(rolePgAuditLogAttr).(string)
+	
+	var sql string
+	if pgAuditLog == "" {
+		// Reset to default if empty
+		sql = fmt.Sprintf("ALTER ROLE %s RESET pgaudit.log", pq.QuoteIdentifier(roleName))
+	} else {
+		sql = fmt.Sprintf("ALTER ROLE %s SET pgaudit.log = '%s'", pq.QuoteIdentifier(roleName), pqQuoteLiteral(pgAuditLog))
+	}
+	
+	if _, err := txn.Exec(sql); err != nil {
+		return fmt.Errorf("could not set pgaudit.log for role %s: %w", roleName, err)
+	}
 	return nil
 }
