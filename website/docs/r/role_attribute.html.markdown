@@ -30,6 +30,14 @@ resource "postgresql_role_attribute" "app_iam_service_account_role_attrs" {
   name                      = postgresql_role.app_iam_service_account.name
   bypass_row_level_security = true
 }
+
+# Configure pgAudit settings for role
+resource "postgresql_role_attribute" "dba_audit_attrs" {
+  name        = "dba_role"
+  extension_attrs = {
+    "pgaudit.log" = "all"
+  }
+}
 ```
 
 ## Argument Reference
@@ -50,6 +58,7 @@ resource "postgresql_role_attribute" "app_iam_service_account_role_attrs" {
 * `search_path` - (Optional) Sets the role's search path.
 * `statement_timeout` - (Optional) Abort any statement that takes more than the specified number of milliseconds.
 * `assume_role` - (Optional) Role to switch to at login.
+* `extension_attrs` - (Optional) Map of arbitrary GUC (Grand Unified Configuration) key-value pairs to set for the role.
 
 ## Import
 
